@@ -400,7 +400,11 @@ addBtn.addEventListener("click", () => {
     newBtn.addEventListener("click", () => {
       document.querySelectorAll(".char-btn").forEach(b => b.classList.remove("active"));
       newBtn.classList.add("active");
-      selectedChar = newBtn.textContent;
+      // 更新選中的字
+      placedChars_Mode.activate(newBtn.textContent);
+      cutingImage_Mode.deactivate();
+      pasteCutImage_Mode.deactivate();
+      lasso_Mode.deactivate();
     });
 
     sidebar.insertBefore(newBtn, document.getElementById("add-section")); // 插在新增區塊前
