@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>排隊等待模擬（含隨機剩餘時間）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: "Noto Sans TC", Arial, sans-serif; margin:20px; color:#111; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
+    label { font-size:13px; }
+    input, select, button { padding:6px 8px; border-radius:6px; border:1px solid #ccc; }
+    .box { padding:12px; border-radius:8px; border:1px solid #eee; margin-top:10px; background:#fafafa; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; }
+    th,td{ border:1px solid #eee; padding:6px; font-size:13px; text-align:left; }
+    th{ background:#f5f5f5; }
+    .muted{ color:#666; font-size:13px; }
+  </style>
+</head>
+<body>
+  <h2>排隊等待模擬（店內已滿，座位剩餘時間隨機）</h2>
+  <div class="box">
+    <div class="row">
+      <div>
+        <label>座位數 s</label><br/>
+        <input id="seats" type="number" min="1" value="10"/>
+      </div>
+      <div>
+        <label>排隊人數 q</label><br/>
+        <input id="queue" type="number" min="1" value="25"/>
+      </div>
+      <div>
+        <label>平均用餐時間 μ (min)</label><br/>
+        <input id="mu" type="number" min="2" value="45"/>
+      </div>
+      <div>
+        <label>用餐時間標準差 σ (min)</label><br/>
+        <input id="sigma" type="number" min="0" value="7"/>
+      </div>
+      <div>
+        <label>分佈類型</label><br/>
+        <select id="dist">
+          <option value="truncnorm">Truncated Normal</option>
+        </select>
+      </div>
+
+      <div>
+        <label>初始剩餘取樣模式</label><br/>
+        <select id="resMode">
+          <option value="equilibrium">平衡殘餘近似（推薦）</option>
+        </select>
+      </div>
+
+      <div>
+        <label>模擬次數</label><br/>
+        <input id="nSim" type="number" min="100" value="3000"/>
+      </div>
+
+      <div>
+        <label>size-bias 抽樣 m（平衡模式）</label><br/>
+        <input id="mSamples" type="number" min="50" value="500"/>
+      </div>
+
+      <div style="align-self:flex-end;">
+        <button id="runBtn">執行模擬</button>
+      </div>
+    </div>
+
+    <div class="muted" style="margin-top:8px;">
+      <div>說明：若選擇「平衡殘餘」，程式以 size-biased 抽樣再取位內均勻位置之方法近似 equilibrium residual。</div>
+      <div>注意：對 heavy-tailed 分佈或非常小的 s，建議增加模擬次數。</div>
+    </div>
+  </div>
+
+  <div id="output" class="box"></div>
+
+  <script>
+    
+    // Generate a sample from truncated normal using rejection (simple)
+    function randTruncNormal(mu, sigma) {
+      // reject negative
+      for (let i=0;i<1000;i++){
+        // Box-Muller
+        const u1 = Math.random(), u2 = Math.random();
+        const z = Math.sqrt(-2*Math.log(u1)) * Math.cos(2*Math.PI*u2);
+        const v = mu + sigma*z;
+        if (v > 0 && v < 2*mu) return v;
+      }
+    }
+
+    // Draw one service time S from chosen distribution
+    function sampleService(dist, mu, sigma) {
+        return randTruncNormal(mu, sigma);
+    }
+
+    // size-biased selection: draw m samples S_i, pick index with probability proportional to S_i
+    function sampleSizeBiased(dist, mu, sigma, m) {
+      // draw m samples
+      const arr = new Array(m);
+      let sum = 0;
+      for (let i=0;i<m;i++){
+        const v = sampleService(dist, mu, sigma);
+        arr[i] = v;
+        sum += v;
+      }
+      // pick weighted
+      const r = Math.random() * sum;
+      let acc = 0;
+      for (let i=0;i<m;i++){
+        acc += arr[i];
+        if (r <= acc) return arr[i];
+      }
+    }
+
+    // Get one residual sample according to selected mode
+    function sampleResidual(dist, mu, sigma, m) {
+      // equilibrium approx
+      // sample size-biased S*, then remaining = S* * (1 - U)
+      const Sstar = sampleSizeBiased(dist, mu, sigma, m);
+      const U = Math.random();
+      return Sstar * (1 - U);
+    }
+
+    // Run one discrete-event simulation trial and return waiting times array (length q)
+    function runOneTrial(s, q, dist, mu, sigma, resMode, mSamples) {
+
+      // event list: arrays of current seated customers' leave times
+      // we simulate time from t=0; maintain a min-heap via array scan (s is small typically)
+      let leaveTimes = [];
+
+      for (let j=0;j<s;j++){
+        const R = sampleResidual(dist, mu, sigma, mSamples);
+        leaveTimes.push(R);
+      }
+
+      // sort leaveTimes ascending
+      leaveTimes.sort((a,b)=>a-b);
+
+      // simulate serving queued customers: when earliest seat frees, next in queue sits
+      let waitingTimes = new Array(q).fill(0);
+      let currentTime = 0;
+      // index of next queued person (1-based for human, 0-based here)
+      let nextIndex = 0;
+
+      while (nextIndex < q) {
+        // find earliest leave
+        leaveTimes.sort((a,b)=>a-b);
+        const tNext = leaveTimes[0];
+        currentTime = tNext;
+        // this seat freed at currentTime, assign next queued person
+        // their waiting time = currentTime
+        waitingTimes[nextIndex] = currentTime;
+        // generate new service time for this seated person
+        const Snew = sampleService(dist, mu, sigma);
+        // new leave time = currentTime + Snew
+        leaveTimes[0] = currentTime + Snew;
+        nextIndex += 1;
+      }
+
+      return waitingTimes; // array of length q: waiting time until seating (minutes)
+    }
+
+    // statistics helpers
+    function mean(arr) {
+      if (arr.length===0) return 0;
+      const s = arr.reduce((a,b)=>a+b,0);
+      return s/arr.length;
+    }
+    function sd(arr) {
+      if (arr.length<=1) return 0;
+      const m = mean(arr);
+      const v = arr.reduce((a,b)=>a + (b-m)*(b-m), 0) / (arr.length - 1);
+      return Math.sqrt(v);
+    }
+
+    function formatMinSec(x) {
+      const totalSec = Math.round(x * 60); // 轉換成秒
+      const min = Math.floor(totalSec / 60);
+      const sec = totalSec % 60;
+      return `${min}分${sec}秒`;
+    }
+
+    document.getElementById('runBtn').addEventListener('click', async ()=> {
+      const s = Math.max(1, parseInt(document.getElementById('seats').value));
+      const q = Math.max(0, parseInt(document.getElementById('queue').value));
+      const mu = Math.max(0.001, parseFloat(document.getElementById('mu').value));
+      const sigma = Math.max(0, parseFloat(document.getElementById('sigma').value));
+      const dist = document.getElementById('dist').value;
+      const resMode = document.getElementById('resMode').value;
+      const nSim = Math.max(100, parseInt(document.getElementById('nSim').value));
+      const mSamples = Math.max(10, parseInt(document.getElementById('mSamples').value));
+
+      const out = document.getElementById('output');
+      out.innerHTML = `<div class="muted">模擬中…（${nSim} 次）請稍候（視 CPU 而定）</div>`;
+
+      // run simulations
+      // We'll collect waiting times for each simulation for summary statistics of last person, and optionally per-person
+      const lastWaits = [];
+      const summaryFirstN = Math.min(q, 10); // for display
+      const perPositionStats = Array.from({length: q}, ()=>[]); // may be heavy if q large
+      for (let sim=0; sim<nSim; sim++){
+        const waits = runOneTrial(s, q, dist, mu, sigma, resMode, mSamples);
+        if (q>0) lastWaits.push(waits[q-1]);
+        // collect first few positions for stats
+        for (let i=0;i<summaryFirstN;i++) {
+          perPositionStats[i].push(waits[i]);
+        }
+        // yield to UI occasionally
+        if (sim % 200 === 0) await new Promise(r=>setTimeout(r,0));
+      }
+
+      // compute stats
+      function statsFromArray(arr) {
+        if (arr.length===0) return {n:0, mean:0, sd:0, ciLow:0, ciHigh:0};
+        const m = mean(arr), sdev = sd(arr);
+        const se = sdev / Math.sqrt(arr.length);
+        const ciLow = m - 1.96 * se;
+        const ciHigh = m + 1.96 * se;
+        return {n:arr.length, mean:m, sd:sdev, ciLow, ciHigh};
+      }
+
+      const lastStats = statsFromArray(lastWaits);
+      // per-position stats for first few
+      const perStats = [];
+      for (let i=0;i<summaryFirstN;i++){
+        perStats.push(statsFromArray(perPositionStats[i]));
+      }
+
+      // render results
+      let html = `<div><strong>輸入摘要</strong>
+        <div class="muted">s=${s}, q=${q}, μ=${mu} min, σ=${sigma} min, dist=${dist}, resMode=${resMode}</div>
+      </div>`;
+
+      html += `<div style="margin-top:8px;"><strong>最後一位（第 ${q} 人）模擬結果</strong>
+        <table><thead><tr><th>樣本數</th><th>平均等待(min,s)</th><th>sd (min)</th><th>95% CI of mean</th></tr></thead>
+        <tbody>
+        <tr><td>${lastStats.n}</td><td>${formatMinSec(lastStats.mean)}</td><td>${formatMinSec(lastStats.sd)}</td>
+        <td>${formatMinSec(lastStats.ciLow)} — ${formatMinSec(lastStats.ciHigh)}</td></tr>
+        </tbody></table>
+      </div>`;
+
+      out.innerHTML = html;
+
+    });
+  </script>
+</body>
+</html>
