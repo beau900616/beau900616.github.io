@@ -109,6 +109,12 @@
 
     setTodayToEnd();
 
+    function initialSetStartday(){
+      startInput.value = `2025-02-09`;
+    }
+
+    initialSetStartday();
+
     endIsToday.addEventListener('change', ()=>{
       if(endIsToday.checked){
         setTodayToEnd();
