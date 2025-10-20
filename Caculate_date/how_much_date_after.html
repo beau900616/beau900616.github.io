@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>交往天數計算機</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,'Microsoft JhengHei','Noto Sans TC',Arial;line-height:1.4}
+    body{max-width:760px;margin:36px auto;padding:20px;border:1px solid #e6e6e6;border-radius:12px}
+    h1{font-size:1.4rem;margin-bottom:8px}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}
+    label{min-width:120px}
+    input[type=date]{padding:6px;border:1px solid #ccc;border-radius:6px}
+    button{padding:8px 12px;border-radius:8px;border:0;background:#0366d6;color:#fff;cursor:pointer}
+    button.secondary{background:#eee;color:#111}
+    .result{margin-top:16px;padding:14px;border-radius:10px;background:#f7faff;border:1px solid #e1efff}
+    pre{white-space:pre-wrap;margin:0}
+    small{color:#666}
+    .muted{color:#666;font-size:0.9rem}
+  </style>
+</head>
+<body>
+  <h1>交往天數計算機</h1>
+  <p class="muted">輸入交往開始日與指定日期，可選擇是否包含起始日。結果會顯示總天數與年/月/日的日曆差異。</p>
+
+  <div class="row">
+    <label for="start">開始日期</label>
+    <input id="start" type="date" />
+  </div>
+
+  <div class="row">
+    <label for="useToday">指定日期</label>
+    <input id="end" type="date" />
+    <label style="display:inline-flex;align-items:center;gap:8px;margin-left:12px"><input id="endIsToday" type="checkbox" checked/> 指定為今天</label>
+  </div>
+
+  <div class="row">
+    <label>計算方式</label>
+    <label><input name="inclusive" type="radio" value="inclusive" checked/> 含開始日</label>
+    <label><input name="inclusive" type="radio" value="exclusive"/> 不含開始日</label>
+  </div>
+
+  <div class="row">
+    <button id="calc">計算</button>
+    <button id="reset" class="secondary">重設</button>
+    <button id="save" class="secondary">儲存開始日（LocalStorage）</button>
+  </div>
+
+  <div id="out" class="result" aria-live="polite" hidden>
+    <strong>結果</strong>
+    <div id="summary" style="margin-top:8px"></div>
+    <pre id="detail"></pre>
+  </div>
+
+  <script>
+    // 工具函式：將 date input 的 YYYY-MM-DD 轉成 Date（本地時區，午夜）
+    function parseDateLocal(value){
+      if(!value) return null;
+      const [y,m,d] = value.split('-').map(Number);
+      return new Date(y, m-1, d); // local midnight
+    }
+
+    // 精確年月日差異（calendar-aware）
+    function diffYMD(from, to){
+      // 假定 to >= from
+      let y = to.getFullYear() - from.getFullYear();
+      let m = to.getMonth() - from.getMonth();
+      let d = to.getDate() - from.getDate();
+      if(d < 0){
+        m -= 1;
+        // 往前移一個月的天數
+        const tmp = new Date(to.getFullYear(), to.getMonth(), 0); // 上個月的最後一天
+        d += tmp.getDate();
+      }
+      if(m < 0){
+        y -= 1;
+        m += 12;
+      }
+      return {years: y, months: m, days: d};
+    }
+
+    function daysBetween(from, to){
+      // 以本地午夜為基礎計算整天差
+      const msPerDay = 24*60*60*1000;
+      const t1 = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+      const t2 = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+      return Math.round((t2 - t1)/msPerDay);
+    }
+
+    // DOM
+    const startInput = document.getElementById('start');
+    const endInput = document.getElementById('end');
+    const endIsToday = document.getElementById('endIsToday');
+    const calcBtn = document.getElementById('calc');
+    const out = document.getElementById('out');
+    const summary = document.getElementById('summary');
+    const detail = document.getElementById('detail');
+    const resetBtn = document.getElementById('reset');
+    const saveBtn = document.getElementById('save');
+
+    // 預設：將今天填到 end input
+    function setTodayToEnd(){
+      const t = new Date();
+      const y = t.getFullYear();
+      const m = (t.getMonth()+1).toString().padStart(2,'0');
+      const d = t.getDate().toString().padStart(2,'0');
+      endInput.value = `${y}-${m}-${d}`;
+    }
+
+    setTodayToEnd();
+
+    endIsToday.addEventListener('change', ()=>{
+      if(endIsToday.checked){
+        setTodayToEnd();
+        endInput.disabled = true;
+      } else {
+        endInput.disabled = false;
+      }
+    });
+    // 初始把 end input disabled
+    endInput.disabled = true;
+
+    calcBtn.addEventListener('click', ()=>{
+      const start = parseDateLocal(startInput.value);
+      if(!start){
+        alert('請輸入有效的開始日期。');
+        startInput.focus();
+        return;
+      }
+      const end = endIsToday.checked ? new Date() : parseDateLocal(endInput.value);
+      if(!end){
+        alert('請輸入有效的結束日期或勾選「以今天為結束日」。');
+        endInput.focus();
+        return;
+      }
+      // 將 time-of-day 清為 midnight
+      const s = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+      const e = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+
+      const inclusive = document.querySelector('input[name="inclusive"]:checked').value === 'inclusive';
+      let days = daysBetween(s, e);
+      if(inclusive) days += 1; // 包含起始日
+
+      if(days < 0){
+        alert('結束日必須在開始日之後。');
+        return;
+      }
+
+      // calendar diff uses to >= from
+      const calendarDiff = (e >= s) ? diffYMD(s, e) : {years:0,months:0,days:0};
+
+      out.hidden = false;
+      summary.innerHTML = `<span class="muted">從</span> <strong>${startInput.value}</strong> <span class="muted">到</span> <strong>${endIsToday.checked ? '今天' : endInput.value}</strong>，<strong>總天數： ${days} 天</strong>`;
+
+      detail.textContent = `日曆差異： ${calendarDiff.years} 年 ${calendarDiff.months} 月 ${calendarDiff.days} 日\n
+(年/月/日表示以日曆為單位的差異，非固定天數換算)\n
+計算方式: ${inclusive ? '包含開始日' : '不包含開始日'}`;
+    });
+
+    resetBtn.addEventListener('click', ()=>{
+      startInput.value = '2025-02-09';
+      endIsToday.checked = true;
+      setTodayToEnd();
+      out.hidden = true;
+    });
+
+    saveBtn.addEventListener('click', ()=>{
+      if(!startInput.value){ alert('請先輸入開始日期以儲存。'); return; }
+      try{
+        localStorage.setItem('relationStartDate', startInput.value);
+        alert('已儲存開始日期到 LocalStorage。');
+      }catch(e){
+        alert('儲存失敗：' + e.message);
+      }
+    });
+
+    // 嘗試從 localStorage 讀取
+    (function loadSaved(){
+      try{
+        const v = localStorage.getItem('relationStartDate');
+        if(v) startInput.value = v;
+      }catch(e){ /* ignore */ }
+    })();
+
+    // Accessibility: Enter 鍵觸發計算
+    document.addEventListener('keydown', (ev)=>{
+      if(ev.key === 'Enter'){
+        calcBtn.click();
+      }
+    });
+  </script>
+</body>
+</html>
