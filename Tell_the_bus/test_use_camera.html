@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>靜態公車偵測器（純前端 + 鏡頭擷取）</title>
+  <style>
+    :root{font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", Arial;}
+    body{max-width:980px;margin:24px auto;padding:16px;line-height:1.5;color:#111}
+    h1{font-size:1.25rem;margin-bottom:8px}
+    .controls{display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+    #canvasWrap{position:relative;display:inline-block;border:1px solid #ddd}
+    canvas, video{display:block;max-width:100%;height:auto}
+    #message{margin-top:10px}
+    .badge{background:#f3f4f6;padding:6px 10px;border-radius:6px;font-size:0.9rem}
+    .footer{margin-top:18px;font-size:0.9rem;color:#555}
+    button{padding:8px 12px;border-radius:6px;border:1px solid #bbb;background:#fff;cursor:pointer}
+    button:disabled{opacity:0.5;cursor:not-allowed}
+    input[type=file]{display:block}
+    label{font-size:0.95rem}
+  </style>
+</head>
+<body>
+  <h1>靜態公車偵測器（純前端 + 鏡頭擷取）</h1>
+  <p>說明：此頁面可上傳圖片或使用鏡頭，每秒自動擷取影像並使用 COCO-SSD 模型偵測是否有「bus」，以紅框顯示。所有推論在瀏覽器端進行。</p>
+
+  <div class="controls">
+    <div>
+      <label for="imageInput">上傳照片：</label><br />
+      <input id="imageInput" type="file" accept="image/*" />
+    </div>
+    <div>
+      <label for="threshold">信心門檻：</label><br />
+      <input id="threshold" type="range" min="0" max="100" value="50" />
+      <div class="badge">目前：<span id="thresholdVal">0.50</span></div>
+    </div>
+    <div>
+      <button id="runBtn" disabled>執行偵測</button>
+      <button id="downloadBtn" disabled>下載標註圖</button>
+      <button id="camBtn">啟動鏡頭</button>
+      <button id="stopCamBtn" disabled>停止鏡頭</button>
+    </div>
+  </div>
+
+  <div id="canvasWrap">
+    <video id="video" autoplay playsinline muted hidden></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div id="message" class="badge">模型載入中，請稍候…</div>
+
+  <div class="footer">
+    使用 <code>@tensorflow/tfjs</code> 與 <code>@tensorflow-models/coco-ssd</code>。所有處理均在本地裝置完成。
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+  <script>
+  (function(){
+    const fileInput = document.getElementById('imageInput');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const messageEl = document.getElementById('message');
+    const runBtn = document.getElementById('runBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const thresholdRange = document.getElementById('threshold');
+    const thresholdVal = document.getElementById('thresholdVal');
+    const camBtn = document.getElementById('camBtn');
+    const stopCamBtn = document.getElementById('stopCamBtn');
+    const video = document.getElementById('video');
+
+    let model = null;
+    let currentImage = null;
+    let camStream = null;
+    let camInterval = null;
+
+    const MAX_DIM = 1280;
+
+    function setMessage(txt){ messageEl.textContent = txt; }
+
+    async function loadModel(){
+      try{
+        setMessage('載入模型中…');
+        model = await cocoSsd.load();
+        setMessage('模型已載入，可上傳圖片或啟動鏡頭。');
+        runBtn.disabled = false;
+      }catch(e){
+        console.error(e);
+        setMessage('模型載入失敗。');
+      }
+    }
+
+    function fileToImage(file){
+      return new Promise((resolve,reject)=>{
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = ()=>{
+          const {width, height} = img;
+          let targetW=width,targetH=height;
+          if(Math.max(width,height)>MAX_DIM){
+            const scale = MAX_DIM/Math.max(width,height);
+            targetW=Math.round(width*scale);
+            targetH=Math.round(height*scale);
+            const tmp=document.createElement('canvas');
+            tmp.width=targetW;tmp.height=targetH;
+            const tctx=tmp.getContext('2d');
+            tctx.drawImage(img,0,0,targetW,targetH);
+            const scaledUrl=tmp.toDataURL('image/jpeg');
+            const scaledImg=new Image();
+            scaledImg.onload=()=>{URL.revokeObjectURL(url);resolve(scaledImg);};
+            scaledImg.onerror=reject;
+            scaledImg.src=scaledUrl;
+          }else{URL.revokeObjectURL(url);resolve(img);}
+        };
+        img.onerror=reject;
+        img.src=url;
+      });
+    }
+
+    function drawImageToCanvas(img){
+      canvas.width=img.width||img.videoWidth;
+      canvas.height=img.height||img.videoHeight;
+      ctx.drawImage(img,0,0,canvas.width,canvas.height);
+    }
+
+    function drawDetections(detections, conf){
+      ctx.lineWidth=Math.max(2,Math.floor(canvas.width/300));
+      ctx.font=`${Math.max(12,Math.floor(canvas.width/60))}px Arial`;
+      detections.forEach(d=>{
+        if(d.score<conf||d.class!=='bus')return;
+        const [x,y,w,h]=d.bbox;
+        ctx.strokeStyle='red';
+        ctx.strokeRect(x,y,w,h);
+        const text=`bus ${(d.score*100).toFixed(1)}%`;
+        const tw=ctx.measureText(text).width;
+        const th=parseInt(ctx.font,10)+6;
+        ctx.fillStyle='rgba(255,0,0,0.75)';
+        ctx.fillRect(x,Math.max(0,y-th),tw+8,th);
+        ctx.fillStyle='white';
+        ctx.fillText(text,x+4,Math.max(0,y-4));
+      });
+    }
+
+    async function runDetection(source){
+      if(!model)return;
+      drawImageToCanvas(source);
+      const conf=Number(thresholdRange.value)/100;
+      try{
+        const preds=await model.detect(canvas);
+        const buses=preds.filter(p=>p.class==='bus'&&p.score>=conf);
+        ctx.drawImage(source,0,0,canvas.width,canvas.height);
+        drawDetections(preds,conf);
+        if(buses.length===0) setMessage('沒有偵測到公車');
+        else setMessage(`偵測到 ${buses.length} 輛公車`);
+      }catch(e){console.error(e);setMessage('偵測錯誤');}
+    }
+
+    function downloadAnnotated(){
+      const link=document.createElement('a');
+      link.download='annotated_bus.png';
+      link.href=canvas.toDataURL('image/png');
+      link.click();
+    }
+
+    async function startCamera(){
+      try{
+        camStream=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+        video.srcObject=camStream;
+        video.hidden=false;
+        stopCamBtn.disabled=false;
+        camBtn.disabled=true;
+        setMessage('鏡頭啟動中…');
+        await new Promise(r=>video.onloadedmetadata=r);
+        canvas.width=video.videoWidth;
+        canvas.height=video.videoHeight;
+        setMessage('鏡頭運作中，每秒偵測一次。');
+        camInterval=setInterval(()=>runDetection(video),1000);
+      }catch(e){console.error(e);setMessage('無法啟動鏡頭，請檢查權限。');}
+    }
+
+    function stopCamera(){
+      if(camInterval){clearInterval(camInterval);camInterval=null;}
+      if(camStream){camStream.getTracks().forEach(t=>t.stop());camStream=null;}
+      video.hidden=true;
+      camBtn.disabled=false;
+      stopCamBtn.disabled=true;
+      setMessage('鏡頭已停止。');
+    }
+
+    fileInput.addEventListener('change',async ev=>{
+      const f=ev.target.files&&ev.target.files[0];
+      if(!f)return;
+      runBtn.disabled=true;downloadBtn.disabled=true;setMessage('載入圖片中…');
+      try{
+        const img=await fileToImage(f);
+        currentImage=img;drawImageToCanvas(img);
+        setMessage('圖片已載入，按執行偵測');
+        runBtn.disabled=false;
+      }catch(e){console.error(e);setMessage('讀取失敗');}
+    });
+
+    runBtn.addEventListener('click',async()=>{if(currentImage){await runDetection(currentImage);downloadBtn.disabled=false;}});
+    downloadBtn.addEventListener('click',downloadAnnotated);
+    thresholdRange.addEventListener('input',()=>{thresholdVal.textContent=(Number(thresholdRange.value)/100).toFixed(2);});
+    camBtn.addEventListener('click',startCamera);
+    stopCamBtn.addEventListener('click',stopCamera);
+
+    loadModel();
+  })();
+  </script>
+</body>
+</html>
