@@ -164,7 +164,15 @@
 
     async function startCamera(){
       try{
-        camStream=await navigator.mediaDevices.getUserMedia({video:{ facingMode: "environment" },audio:false});
+         // 1️⃣ 列出所有媒體裝置
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === "videoinput");
+        // 2️⃣ 嘗試找名稱中包含 "back" 或 "environment" 的裝置
+        const backCam = videoDevices.find(d =>
+        /back|environment/i.test(d.label)
+        ) || videoDevices[videoDevices.length - 1]; // fallback
+
+        camStream=await navigator.mediaDevices.getUserMedia({ deviceId: backCam.deviceId ? { exact: backCam.deviceId } : undefined });
         video.srcObject=camStream;
         video.hidden=false;
         stopCamBtn.disabled=false;
