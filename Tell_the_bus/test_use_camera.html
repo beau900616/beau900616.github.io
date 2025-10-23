@@ -164,7 +164,7 @@
 
     async function startCamera(){
       try{
-        camStream=await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+        camStream=await navigator.mediaDevices.getUserMedia({video:{ facingMode: "environment" },audio:false});
         video.srcObject=camStream;
         video.hidden=false;
         stopCamBtn.disabled=false;
