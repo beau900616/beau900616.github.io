@@ -172,7 +172,7 @@
         /back|environment/i.test(d.label)
         ) || videoDevices[videoDevices.length - 1]; // fallback
 
-        camStream=await navigator.mediaDevices.getUserMedia({ deviceId: backCam.deviceId ? { exact: backCam.deviceId } : undefined });
+        camStream=await navigator.mediaDevices.getUserMedia({ video: true });
         video.srcObject=camStream;
         video.hidden=false;
         stopCamBtn.disabled=false;
