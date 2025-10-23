@@ -164,21 +164,6 @@
 
     async function startCamera(){
       try{
-         // 1️⃣ 列出所有媒體裝置
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = devices.filter(d => d.kind === "videoinput");
-        // 將裝置列表放入 message div
-        if (videoDevices.length > 0) {
-        messageDiv.innerHTML = "<strong>找到以下視訊裝置：</strong><br>" +
-            videoDevices.map((d, i) => `${i+1}. ${d.label || "(未命名)"} - id: ${d.deviceId}`).join("<br>");
-        } else {
-        messageDiv.textContent = "沒有找到視訊裝置";
-        }
-        // 2️⃣ 嘗試找名稱中包含 "back" 或 "environment" 的裝置
-        const backCam = videoDevices.find(d =>
-        /back|environment/i.test(d.label)
-        ) || videoDevices[videoDevices.length - 1]; // fallback
-
         camStream=await navigator.mediaDevices.getUserMedia({video: { facingMode: "environment" }});
         video.srcObject=camStream;
         video.hidden=false;
