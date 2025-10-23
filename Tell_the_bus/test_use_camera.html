@@ -210,7 +210,7 @@
     runBtn.addEventListener('click',async()=>{if(currentImage){await runDetection(currentImage);downloadBtn.disabled=false;}});
     downloadBtn.addEventListener('click',downloadAnnotated);
     thresholdRange.addEventListener('input',()=>{thresholdVal.textContent=(Number(thresholdRange.value)/100).toFixed(2);});
-    camBtn.addEventListener('click',startCamera);
+    camBtn.addEventListener('click', () => {startCamera();  });
     stopCamBtn.addEventListener('click',stopCamera);
 
     loadModel();
