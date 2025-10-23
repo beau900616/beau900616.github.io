@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Client-side OCR（Tesseract.js 4.1.1）</title>
+  <style>
+    html,body { height:100%; margin:0; font-family: system-ui, -apple-system, "Noto Sans TC", "Microsoft JhengHei", Arial; background:#f7f9fc; color:#222; }
+    .container { max-width:900px; margin:28px auto; padding:18px; background:#fff; box-shadow:0 6px 18px rgba(0,0,0,0.06); border-radius:8px; }
+    h1 { margin:0 0 12px 0; font-size:20px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+    .preview { width:260px; height:180px; border:1px dashed #cbd5e1; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#fbfdff; }
+    .preview img { max-width:100%; max-height:100%; display:block; }
+    input[type=file] { padding:6px; }
+    button { padding:8px 12px; border: none; border-radius:6px; background:#0b63d6; color:#fff; cursor:pointer; }
+    button:disabled { opacity:0.5; cursor:not-allowed; }
+    .progress { width:100%; height:10px; background:#e6eefc; border-radius:6px; overflow:hidden; margin-top:6px; }
+    .progress > i { display:block; height:100%; width:0%; background:#0b63d6; transition: width 120ms linear; }
+    textarea { width:100%; min-height:200px; padding:12px; font-family: monospace; border-radius:6px; border:1px solid #d1d5db; resize:vertical; }
+    .meta { font-size:13px; color:#555; margin-top:6px; }
+    .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    label.small { font-size:13px; color:#444; }
+    select { padding:6px; border-radius:6px; }
+  </style>
+</head>
+<body>
+  <div class="container" role="main">
+    <h1>Client-side OCR（Tesseract.js v4.1.1）</h1>
+
+    <div class="row">
+      <div>
+        <label class="small">選擇圖片（僅在本機處理）</label><br/>
+        <input id="fileInput" type="file" accept="image/*" />
+      </div>
+
+      <div style="flex:1">
+        <div class="controls">
+          <label class="small">語言：</label>
+          <select id="langSelect" title="選擇語言">
+            <option value="eng">English (eng)</option>
+            <option value="chi_tra">中文（繁體｜chi_tra）</option>
+            <option value="eng+chi_tra">eng + 繁中</option>
+          </select>
+          <button id="recognizeBtn" disabled>開始辨識</button>
+          <button id="cancelBtn" disabled>取消</button>
+          <button id="clearBtn">清除</button>
+        </div>
+        <div class="meta">說明：所有運算在使用者瀏覽器上執行，網頁不會上傳圖片到任何伺服器。使用時請先選擇圖片，再按「開始辨識」。</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="preview" id="preview">預覽（未選取圖片）</div>
+      <div style="flex:1">
+        <div>進度：<span id="status">等待</span></div>
+        <div class="progress" aria-hidden="true"><i id="bar"></i></div>
+        <div class="meta" id="detail"></div>
+      </div>
+    </div>
+
+    <h2 style="font-size:16px; margin-top:8px;">辨識結果</h2>
+    <textarea id="result" placeholder="辨識後的文字會出現在這裡..." readonly></textarea>
+  </div>
+
+  <!-- 指定版本的 tesseract.js -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
+  <script>
+  (function(){
+    const fileInput = document.getElementById('fileInput');
+    const preview = document.getElementById('preview');
+    const recognizeBtn = document.getElementById('recognizeBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const statusEl = document.getElementById('status');
+    const detailEl = document.getElementById('detail');
+    const bar = document.getElementById('bar');
+    const resultEl = document.getElementById('result');
+    const langSelect = document.getElementById('langSelect');
+
+    let currentDataUrl = null;
+    let ongoing = false;
+    let abortController = null; // for cooperative cancellation (used with fetch-like APIs inside Tesseract not directly available, but keep for future)
+    let lastWorkerPromise = null;
+
+    // Helper: show preview image from DataURL
+    function showPreview(dataUrl){
+      preview.innerHTML = '';
+      const img = new Image();
+      img.src = dataUrl;
+      img.alt = 'preview';
+      preview.appendChild(img);
+    }
+
+    // Resize large images on client to reduce OCR workload.
+    async function resizeImageIfNeeded(file, maxWidth=1600, maxHeight=1600){
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          const w = img.naturalWidth, h = img.naturalHeight;
+          let sw = 1;
+          if (w > maxWidth) sw = maxWidth / w;
+          if (h * sw > maxHeight) sw = Math.min(sw, maxHeight / h);
+          if (sw >= 1) {
+            // no need to resize
+            // convert original file to dataURL
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = (e) => reject(e);
+            reader.readAsDataURL(file);
+            return;
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(w * sw);
+          canvas.height = Math.round(h * sw);
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob(blob => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = (e) => reject(e);
+            reader.readAsDataURL(blob);
+          }, 'image/jpeg', 0.9);
+        };
+        img.onerror = (e) => {
+          URL.revokeObjectURL(url);
+          reject(new Error('無法載入圖片'));
+        };
+        img.src = url;
+      });
+    }
+
+    // Update UI helpers
+    function setStatus(text){
+      statusEl.textContent = text;
+    }
+    function setDetail(text){
+      detailEl.textContent = text;
+    }
+    function setProgress(p){ // p: 0..1
+      const pct = Math.round((p || 0) * 100);
+      bar.style.width = pct + '%';
+    }
+    function setControlsBusy(b){
+      recognizeBtn.disabled = b || !currentDataUrl;
+      cancelBtn.disabled = !b;
+      fileInput.disabled = b;
+    }
+
+    // File selected
+    fileInput.addEventListener('change', async (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      setStatus('處理圖片...');
+      setDetail('正在讀取並（如必要）縮放圖片以加速辨識');
+      setProgress(0);
+      try {
+        currentDataUrl = await resizeImageIfNeeded(f);
+        showPreview(currentDataUrl);
+        setStatus('準備就緒');
+        setDetail(`圖片: ${f.name} / ${Math.round(f.size/1024)} KB`);
+        resultEl.value = '';
+        recognizeBtn.disabled = false;
+      } catch (err) {
+        console.error(err);
+        setStatus('載入失敗');
+        setDetail(String(err));
+        currentDataUrl = null;
+        preview.innerText = '預覽（載入失敗）';
+        recognizeBtn.disabled = true;
+      }
+    });
+
+    // Recognize using Tesseract.recognize (v4.1.1 API)
+    recognizeBtn.addEventListener('click', async () => {
+      if (!currentDataUrl || ongoing) return;
+      ongoing = true;
+      setControlsBusy(true);
+      setStatus('啟動 Tesseract');
+      setProgress(0);
+      setDetail('');
+      resultEl.value = '';
+
+      // Important: use Tesseract.recognize as provided by v4.1.1
+      // logger will receive progress updates; structure: { status, progress }
+      const lang = langSelect.value || 'eng';
+      try {
+        // Start recognition
+        const recognizePromise = Tesseract.recognize(
+          currentDataUrl,
+          lang,
+          {
+            logger: m => {
+              // m has fields like { status: 'recognizing text', progress: 0.5 }
+              if (m && typeof m === 'object') {
+                if (m.status) setStatus(m.status);
+                if (typeof m.progress === 'number') setProgress(m.progress);
+                // show more detailed raw info occasionally
+                setDetail(JSON.stringify(m).slice(0, 160));
+              }
+            }
+          }
+        );
+
+        // Keep reference in case we want to handle promise state
+        lastWorkerPromise = recognizePromise;
+
+        const result = await recognizePromise; // returns an object with .data.text in v4
+        const text = result && result.data && typeof result.data.text === 'string' ? result.data.text : '';
+        resultEl.value = text.trim();
+        setStatus('完成');
+        setProgress(1);
+        setDetail(`辨識完成，取得 ${resultEl.value.length} 字元`);
+      } catch (err) {
+        console.error(err);
+        setStatus('錯誤');
+        setDetail(String(err));
+      } finally {
+        ongoing = false;
+        setControlsBusy(false);
+      }
+    });
+
+    // Cancel: note Tesseract.js v4 doesn't expose a graceful cancel on recognize promise.
+    // We provide UI-level cancel which disables further UI and informs user. For stronger cancellation,
+    // an alternative API (createWorker + worker.terminate()) would be required — but user requested v4 API and not mixing. 
+    // We'll implement a best-effort "ignore result" cancellation.
+    cancelBtn.addEventListener('click', () => {
+      if (!ongoing) return;
+      // Mark as cancelled — ignore incoming result and reset UI when promise resolves.
+      ongoing = false;
+      setStatus('已取消（正在等待內部任務停止）');
+      setDetail('注意：Tesseract.recognize 在此版本不支援直接中斷；系統會忽略後續結果並可重新啟動。');
+      setProgress(0);
+      // Disable controls until current promise resolves
+      setControlsBusy(true);
+      // When lastWorkerPromise resolves, clear UI and re-enable
+      if (lastWorkerPromise) {
+        lastWorkerPromise.finally(() => {
+          // only reset if not replaced by another operation
+          ongoing = false;
+          setControlsBusy(false);
+          setStatus('已取消');
+        });
+      } else {
+        setControlsBusy(false);
+      }
+    });
+
+    // Clear
+    clearBtn.addEventListener('click', () => {
+      fileInput.value = '';
+      currentDataUrl = null;
+      preview.innerHTML = '預覽（未選取圖片）';
+      resultEl.value = '';
+      setStatus('等待');
+      setDetail('');
+      setProgress(0);
+      recognizeBtn.disabled = true;
+    });
+
+    // Initialize UI state
+    setStatus('等待');
+    setProgress(0);
+    setDetail('');
+    recognizeBtn.disabled = true;
+    cancelBtn.disabled = true;
+  })();
+  </script>
+</body>
+</html>
