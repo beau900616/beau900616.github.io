@@ -23,23 +23,26 @@
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
+  <script src="seal_model_b64.js"></script>
 </head>
 <body>
   <h2>印章辨識 YOLOv8n (前端推論版)</h2>
   <p>請上傳 JPG 或 PNG 檔案，可多選：</p>
   <input type="file" id="imageInput" accept=".jpg,.jpeg,.png" multiple />
   <div id="preview"></div>
-  
+
 <script>
 let session;
 
 // === 初始化模型 ===
 async function loadModel() {
   console.log("載入 YOLOv8 模型中...");
-  session = await ort.InferenceSession.create("seal.onnx", {
+  // 將 base64 還原成二進位 ArrayBuffer
+  const binary = Uint8Array.from(atob(modelBase64), c => c.charCodeAt(0));
+  session = await ort.InferenceSession.create(binary.buffer, {
     executionProviders: ['wasm']
   });
-  console.log("模型載入完成");
+  console.log("模型載入完成 ✅");
 }
 
 // === 圖片轉 Tensor ===
