@@ -76,48 +76,135 @@ async function imageToTensor(img) {
 }
 
 // === 推論函式 ===
+// ===== 工具函式 =====
+function sigmoid(x) {
+  return 1 / (1 + Math.exp(-x));
+}
+
+function iou(boxA, boxB) {
+  // box: [x1,y1,x2,y2]
+  const x1 = Math.max(boxA[0], boxB[0]);
+  const y1 = Math.max(boxA[1], boxB[1]);
+  const x2 = Math.min(boxA[2], boxB[2]);
+  const y2 = Math.min(boxA[3], boxB[3]);
+  const interW = Math.max(0, x2 - x1);
+  const interH = Math.max(0, y2 - y1);
+  const inter = interW * interH;
+  const areaA = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1]);
+  const areaB = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1]);
+  const union = areaA + areaB - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function nonMaxSuppression(boxes, scores, iouThreshold = 0.45, maxBoxes = 100) {
+  // boxes: [[x1,y1,x2,y2], ...], scores: [s1,s2,...]
+  const idxs = scores
+    .map((s, i) => [s, i])
+    .sort((a, b) => b[0] - a[0]) // 降序
+    .map(x => x[1]);
+
+  const keep = [];
+  while (idxs.length && keep.length < maxBoxes) {
+    const i = idxs.shift();
+    keep.push(i);
+    for (let j = idxs.length - 1; j >= 0; j--) {
+      const k = idxs[j];
+      if (iou(boxes[i], boxes[k]) > iouThreshold) {
+        idxs.splice(j, 1); // 抑制
+      }
+    }
+  }
+  return keep; // 回傳保留的 index
+}
+
+// ===== detect with decode + NMS =====
 async function detect(img, canvas) {
-  const tensor = await imageToTensor(img);
+  if (!session) {
+    console.error("模型尚未載入");
+    return;
+  }
+
+  // 1) 前處理與推論
+  const tensor = await imageToTensor(img); // 1x3x640x640
   const output = await session.run({ images: tensor });
   const key = Object.keys(output)[0];
   const out = output[key];
-  const data = out.data;
-  const shape = out.dims; // [1,84,8400]
+  const data = out.data;         // Float32Array
+  const shape = out.dims;       // e.g. [1,84,8400]
   console.log("模型輸出 shape:", shape);
 
-  const numClass = 1; // 你的模型只有「印章」
-  const numPred = shape[2];
-  const numFeat = shape[1];
+  const numFeat = shape[1]; // e.g. 84
+  const numPred = shape[2]; // e.g. 8400
+  const numClasses = numFeat - 4; // 假設前4是 cx,cy,w,h，其餘為 class logits
 
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = "red";
-  ctx.fillStyle = "red";
-  ctx.lineWidth = 2;
-  ctx.font = "14px sans-serif";
-
+  // 2) decode 每個 candidate -> boxes, scores
+  const boxes = [];
+  const scores = [];
+  const classIds = [];
   for (let i = 0; i < numPred; i++) {
     const cx = data[i];
     const cy = data[numPred + i];
     const w  = data[2 * numPred + i];
     const h  = data[3 * numPred + i];
-    let bestConf = 0;
 
-    // 找出最大分類信心
-    for (let c = 4; c < numFeat; c++) {
-      bestConf = Math.max(bestConf, data[c * numPred + i]);
+    // 依你的模型可能需要對 cx/cy/w/h 做 scale 或 sigmoid，但匯出通常已是像素值（若不是，則需根據 export 方法調整）
+    // 轉成 (x1,y1,x2,y2)
+    const x1 = cx - w / 2;
+    const y1 = cy - h / 2;
+    const x2 = cx + w / 2;
+    const y2 = cy + h / 2;
+
+    // 找最大類別分數 (對 logits 做 sigmoid)
+    let bestClass = -1;
+    let bestScore = 0;
+    for (let c = 0; c < numClasses; c++) {
+      const raw = data[(4 + c) * numPred + i]; // class logits
+      const prob = sigmoid(raw); // 若 export 已是概率，這一步可省
+      if (prob > bestScore) {
+        bestScore = prob;
+        bestClass = c;
+      }
     }
 
-    if (bestConf > 0.5) {
-      const x = cx - w / 2;
-      const y = cy - h / 2;
-      ctx.beginPath();
-      ctx.rect(x, y, w, h);
-      ctx.stroke();
-      ctx.fillText(`Seal ${(bestConf * 100).toFixed(1)}%`, x, y - 5);
+    // 可再與 objectness 合併 (若模型有單獨的 obj-score 欄位則乘上)
+    // 這裡假設 bestScore 已代表最終分數
+    if (bestScore > 0.25) { // 先粗過濾
+      boxes.push([x1, y1, x2, y2]);
+      scores.push(bestScore);
+      classIds.push(bestClass);
     }
   }
+
+  // 3) 做 NMS (IoU threshold 可調)
+  const keepIdx = nonMaxSuppression(boxes, scores, 0.45, 50);
+
+  // 4) 畫框：先清畫布
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(img, 0, 0, W, H);
+  ctx.strokeStyle = "red";
+  ctx.fillStyle = "red";
+  ctx.lineWidth = 2;
+  ctx.font = "14px sans-serif";
+
+  for (const idx of keepIdx) {
+    const [x1, y1, x2, y2] = boxes[idx];
+    const score = scores[idx];
+    // optional: clip to canvas bounds
+    const left = Math.max(0, x1);
+    const top  = Math.max(0, y1);
+    const width = Math.min(W, x2) - left;
+    const height = Math.min(H, y2) - top;
+    ctx.beginPath();
+    ctx.rect(left, top, width, height);
+    ctx.stroke();
+    ctx.fillText(`Seal ${(score * 100).toFixed(1)}%`, left, Math.max(12, top - 6));
+  }
+
+  console.log("檢測結果 (保留數):", keepIdx.length);
 }
+
 
 
 // === 上傳圖片處理 ===
