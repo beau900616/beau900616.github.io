@@ -79,28 +79,46 @@ async function imageToTensor(img) {
 async function detect(img, canvas) {
   const tensor = await imageToTensor(img);
   const output = await session.run({ images: tensor });
-  const outputData = output[Object.keys(output)[0]].data; // Nx6: x,y,w,h,conf,class
+  const key = Object.keys(output)[0];
+  const out = output[key];
+  const data = out.data;
+  const shape = out.dims; // [1,84,8400]
+  console.log("模型輸出 shape:", shape);
+
+  const numClass = 1; // 你的模型只有「印章」
+  const numPred = shape[2];
+  const numFeat = shape[1];
 
   const ctx = canvas.getContext("2d");
-  const w = canvas.width, h = canvas.height;
-  ctx.drawImage(img, 0, 0, w, h);
-  ctx.lineWidth = 2;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   ctx.strokeStyle = "red";
-  ctx.font = "14px sans-serif";
   ctx.fillStyle = "red";
+  ctx.lineWidth = 2;
+  ctx.font = "14px sans-serif";
 
-  for (let i = 0; i < outputData.length; i += 6) {
-    const [x, y, boxW, boxH, conf, cls] = outputData.slice(i, i + 6);
-    if (conf < 0.5) continue; // 信心閾值
+  for (let i = 0; i < numPred; i++) {
+    const cx = data[i];
+    const cy = data[numPred + i];
+    const w  = data[2 * numPred + i];
+    const h  = data[3 * numPred + i];
+    let bestConf = 0;
 
-    const left = (x - boxW / 2);
-    const top = (y - boxH / 2);
-    ctx.beginPath();
-    ctx.rect(left, top, boxW, boxH);
-    ctx.stroke();
-    ctx.fillText(`Seal ${(conf * 100).toFixed(1)}%`, left, top - 5);
+    // 找出最大分類信心
+    for (let c = 4; c < numFeat; c++) {
+      bestConf = Math.max(bestConf, data[c * numPred + i]);
+    }
+
+    if (bestConf > 0.5) {
+      const x = cx - w / 2;
+      const y = cy - h / 2;
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.stroke();
+      ctx.fillText(`Seal ${(bestConf * 100).toFixed(1)}%`, x, y - 5);
+    }
   }
 }
+
 
 // === 上傳圖片處理 ===
 document.getElementById("imageInput").addEventListener("change", async e => {
