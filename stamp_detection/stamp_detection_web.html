@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>印章辨識 YOLOv8n</title>
+  <style>
+    body {
+      font-family: "Noto Sans TC", Arial, sans-serif;
+      margin: 20px;
+      background: #fafafa;
+    }
+    h2 { color: #333; }
+    input[type="file"] { margin: 15px 0; }
+    #preview {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    canvas {
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort.min.js"></script>
+</head>
+<body>
+  <h2>印章辨識 YOLOv8n (前端推論版)</h2>
+  <p>請上傳 JPG 或 PNG 檔案，可多選：</p>
+  <input type="file" id="imageInput" accept=".jpg,.jpeg,.png" multiple />
+  <div id="preview"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
+
+<script>
+let session;
+
+// === 初始化模型 ===
+async function loadModel() {
+  console.log("載入 YOLOv8 模型中...");
+  session = await ort.InferenceSession.create("seal.onnx", {
+    executionProviders: ['wasm']
+  });
+  console.log("模型載入完成");
+}
+
+// === 圖片轉 Tensor ===
+async function imageToTensor(img) {
+  const size = 640; // 與訓練 imgsz 一致
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  canvas.width = size;
+  canvas.height = size;
+  ctx.drawImage(img, 0, 0, size, size);
+  const imgData = ctx.getImageData(0, 0, size, size);
+  const data = imgData.data;
+  const floatData = new Float32Array(size * size * 3);
+
+  // 將像素轉成 [1,3,H,W] 並正規化至 [0,1]
+  let idx = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i] / 255.0;
+    const g = data[i + 1] / 255.0;
+    const b = data[i + 2] / 255.0;
+    const pixelIndex = i / 4;
+    const row = Math.floor(pixelIndex / size);
+    const col = pixelIndex % size;
+    const offset = row * size + col;
+    floatData[offset] = r;
+    floatData[offset + size * size] = g;
+    floatData[offset + 2 * size * size] = b;
+  }
+
+  return new ort.Tensor('float32', floatData, [1, 3, size, size]);
+}
+
+// === 推論函式 ===
+async function detect(img, canvas) {
+  const tensor = await imageToTensor(img);
+  const output = await session.run({ images: tensor });
+  const outputData = output[Object.keys(output)[0]].data; // Nx6: x,y,w,h,conf,class
+
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.drawImage(img, 0, 0, w, h);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "red";
+  ctx.font = "14px sans-serif";
+  ctx.fillStyle = "red";
+
+  for (let i = 0; i < outputData.length; i += 6) {
+    const [x, y, boxW, boxH, conf, cls] = outputData.slice(i, i + 6);
+    if (conf < 0.5) continue; // 信心閾值
+
+    const left = (x - boxW / 2);
+    const top = (y - boxH / 2);
+    ctx.beginPath();
+    ctx.rect(left, top, boxW, boxH);
+    ctx.stroke();
+    ctx.fillText(`Seal ${(conf * 100).toFixed(1)}%`, left, top - 5);
+  }
+}
+
+// === 上傳圖片處理 ===
+document.getElementById("imageInput").addEventListener("change", async e => {
+  const files = [...e.target.files];
+  const preview = document.getElementById("preview");
+  preview.innerHTML = "";
+
+  for (const file of files) {
+    if (!file.type.startsWith("image/")) continue;
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    await img.decode();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 640;
+    preview.appendChild(canvas);
+
+    await detect(img, canvas);
+  }
+});
+
+loadModel();
+
+</script>
+</body>
+</html>
