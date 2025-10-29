@@ -145,61 +145,64 @@ async function detect(img, canvas) {
     return;
   }
 
-  // 1) 前處理與推論
-  const tensor = await imageToTensor(img); // 1x3x640x640
+  // === 1️⃣ 前處理 ===
+  const size = 640;
+  const { canvas: letterCanvas, ratio, padX, padY } = letterboxImageToCanvas(img, size);
+  const tensor = await imageToTensor(img);
+
+  // === 2️⃣ 推論 ===
   const output = await session.run({ images: tensor });
   const key = Object.keys(output)[0];
   const out = output[key];
-  const data = out.data;         // Float32Array
-  const shape = out.dims;       // e.g. [1,84,8400]
-  console.log("模型輸出 shape:", shape);
+  const data = out.data;
+  const shape = out.dims; // [1,84,8400]
 
-  const numFeat = shape[1]; // e.g. 84
-  const numPred = shape[2]; // e.g. 8400
-  const numClasses = numFeat - 4; // 假設前4是 cx,cy,w,h，其餘為 class logits
+  const numFeat = shape[1];
+  const numPred = shape[2];
+  const numClasses = numFeat - 4;
 
-  // 2) decode 每個 candidate -> boxes, scores
-  const boxes = [];
-  const scores = [];
-  const classIds = [];
+  const boxes = [], scores = [], classIds = [];
+
+  // === 3️⃣ 解碼 ===
   for (let i = 0; i < numPred; i++) {
     const cx = data[i];
     const cy = data[numPred + i];
     const w  = data[2 * numPred + i];
     const h  = data[3 * numPred + i];
 
-    // 依你的模型可能需要對 cx/cy/w/h 做 scale 或 sigmoid，但匯出通常已是像素值（若不是，則需根據 export 方法調整）
-    // 轉成 (x1,y1,x2,y2)
     const x1 = cx - w / 2;
     const y1 = cy - h / 2;
     const x2 = cx + w / 2;
     const y2 = cy + h / 2;
 
-    // 找最大類別分數 (對 logits 做 sigmoid)
     let bestClass = -1;
     let bestScore = 0;
     for (let c = 0; c < numClasses; c++) {
-      const raw = data[(4 + c) * numPred + i]; // class logits
-      const prob = sigmoid(raw); // 若 export 已是概率，這一步可省
+      const raw = data[(4 + c) * numPred + i];
+      const prob = sigmoid(raw); // 若已Sigmoid可略
       if (prob > bestScore) {
         bestScore = prob;
         bestClass = c;
       }
     }
 
-    // 可再與 objectness 合併 (若模型有單獨的 obj-score 欄位則乘上)
-    // 這裡假設 bestScore 已代表最終分數
-    if (bestScore > 0.25) { // 先粗過濾
-      boxes.push([x1, y1, x2, y2]);
+    if (bestScore > 0.25) {
+      // 還原至原圖座標
+      const x1r = (x1 - padX) / ratio;
+      const y1r = (y1 - padY) / ratio;
+      const x2r = (x2 - padX) / ratio;
+      const y2r = (y2 - padY) / ratio;
+
+      boxes.push([x1r, y1r, x2r, y2r]);
       scores.push(bestScore);
       classIds.push(bestClass);
     }
   }
 
-  // 3) 做 NMS (IoU threshold 可調)
+  // === 4️⃣ NMS ===
   const keepIdx = nonMaxSuppression(boxes, scores, 0.45, 50);
 
-  // 4) 畫框：先清畫布
+  // === 5️⃣ 繪製 ===
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
@@ -212,15 +215,12 @@ async function detect(img, canvas) {
   for (const idx of keepIdx) {
     const [x1, y1, x2, y2] = boxes[idx];
     const score = scores[idx];
-    // optional: clip to canvas bounds
-    const left = Math.max(0, x1);
-    const top  = Math.max(0, y1);
-    const width = Math.min(W, x2) - left;
-    const height = Math.min(H, y2) - top;
+    const width = x2 - x1;
+    const height = y2 - y1;
     ctx.beginPath();
-    ctx.rect(left, top, width, height);
+    ctx.rect(x1, y1, width, height);
     ctx.stroke();
-    ctx.fillText(`Seal ${(score * 100).toFixed(1)}%`, left, Math.max(12, top - 6));
+    ctx.fillText(`Seal ${(score * 100).toFixed(1)}%`, x1, Math.max(12, y1 - 6));
   }
 
   console.log("檢測結果 (保留數):", keepIdx.length);
